@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "author": "IoT Project",
+  "editor": "wokwi",
+  "parts": [
+    { "type": "wokwi-esp32-devkit-v1", "id": "esp", "top": 0, "left": 0, "attrs": {} },
+    { "type": "wokwi-dht22", "id": "dht1", "top": -40, "left": 100, "attrs": {} },
+    { "type": "wokwi-ntc-temperature-sensor", "id": "ntc1", "top": 100, "left": 100, "attrs": {} }
+  ],
+  "connections": [
+    [ "dht1:VCC", "esp:3V3", "red", [ "h0" ] ],
+    [ "dht1:SDA", "esp:D15", "green", [ "h0" ] ],
+    [ "dht1:GND", "esp:GND", "black", [ "h0" ] ],
+    [ "ntc1:VCC", "esp:3V3", "red", [ "h0" ] ],
+    [ "ntc1:OUT", "esp:D34", "yellow", [ "h0" ] ],
+    [ "ntc1:GND", "esp:GND", "black", [ "h0" ] ]
+  ],
+  "dependencies": {}
+}
