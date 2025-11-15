@@ -1,157 +1,184 @@
 #include <WiFi.h>
 #include <PubSubClient.h>
-#include <DHT.h>
-#include <ArduinoJson.h>
-#include <math.h>  // For NTC calculations
+#include <ArduinoJson.h> 
+#include <OneWire.h>
+#include <DallasTemperature.h>
 
+// --- Konfigurasi Wi-Fi & MQTT ---
 const char* ssid = "Wokwi-GUEST";
-const char* password = "";
+const char* password = ""; 
+const char* mqtt_server = "broker.hivemq.com"; 
 
-const char* mqtt_server = "broker.hivemq.com";
-const int mqtt_port = 1883;
-const char* mqtt_client_id = "WokwiClient1";
-
-const char* TOPIC_TEMP_AIR = "irrigation/sensor/environment";  
-const char* TOPIC_TEMP_SOIL = "irrigation/sensor/soil"; // tidak dipakai untuk publish
-
-#define DHTPIN 15
-#define DHTTYPE DHT22
-#define SOIL_TEMP_PIN 34
-
-#define SERIES_RESISTOR 10000
-#define NTC_NOMINAL 10000
-#define TEMP_NOMINAL 25
-#define B_COEFFICIENT 3950
-#define ADC_MAX 4095.0
-#define VCC 3.3
+// Topics MQTT
+#define TOPIC_PUBLISH_SENSORS "/QWRTY/SensorData"
+#define TOPIC_SUBSCRIBE_STATE "/QWRTY/ControlState"
+#define TOPIC_SUBSCRIBE_THRESHOLD "/QWRTY/TempThreshold"
 
 WiFiClient espClient;
 PubSubClient client(espClient);
-DHT dht(DHTPIN, DHTTYPE);
+long lastMsg = 0;
 
-unsigned long lastPublish = 0;
-const long publishInterval = 2000;  // 2 seconds
+// --- Definisi Sensor & Aktor ---
+#define ONE_WIRE_BUS 25 
+OneWire oneWire(ONE_WIRE_BUS);
+DallasTemperature sensors(&oneWire);
 
-void setup_wifi() {
-  delay(10);
-  Serial.println();
-  Serial.print("Connecting to WiFi: ");
-  Serial.println(ssid);
+#define GAS_SENSOR_PIN 32
+const int GAS_THRESHOLD_HIGH = 3627; 
+const int GAS_THRESHOLD_MID  = 3497; 
 
-  WiFi.begin(ssid, password);
+#define LED_PIN_UNUSED 16 
+#define LED_FULL_OPEN 21  
+#define LED_HALF_OPEN 22  
+#define LED_FULL_CLOSE 23 
 
-  int attempts = 0;
-  while (WiFi.status() != WL_CONNECTED && attempts < 20) {
-    delay(500);
-    Serial.print(".");
-    attempts++;
+// --- Variabel Kontrol dari Wokwi 2 ---
+bool system_running = true; 
+float remote_temp_threshold = 100.0; 
+
+//  VARIABEL BARU: Untuk kontrol reconnect non-blocking
+long lastReconnectAttempt = 0; 
+
+// FUNGSI BARU: Mengatur status LED sesuai kondisi
+void setLEDState(int openLED, int halfLED, int closeLED, const char* condition) {
+    // Matikan semua LED
+    digitalWrite(LED_FULL_OPEN, LOW);
+    digitalWrite(LED_HALF_OPEN, LOW);
+    digitalWrite(LED_FULL_CLOSE, LOW);
+
+    // Nyalakan LED yang sesuai
+    if (openLED) digitalWrite(LED_FULL_OPEN, HIGH);
+    if (halfLED) digitalWrite(LED_HALF_OPEN, HIGH);
+    if (closeLED) digitalWrite(LED_FULL_CLOSE, HIGH);
+    
+    Serial.println(condition);
+}
+
+
+// Handler ketika pesan MQTT diterima
+void callback(char* topic, byte* payload, unsigned int length) {
+  String messageTemp;
+  for (int i = 0; i < length; i++) {
+    messageTemp += (char)payload[i];
+  }
+  
+  if (String(topic) == TOPIC_SUBSCRIBE_STATE) {
+    if (messageTemp == "START") {
+      system_running = true;
+      Serial.println("Kontrol Diterima: Sistem BERJALAN.");
+    } else if (messageTemp == "STOP") {
+      system_running = false;
+      Serial.println("Kontrol Diterima: Sistem DIHENTIKAN.");
+      // Tetapkan LED ke kondisi Tertutup Penuh saat STOP
+      setLEDState(LOW, LOW, HIGH, "DIHENTIKAN MANUAL VIA MQTT"); 
+    }
+  }
+  else if (String(topic) == TOPIC_SUBSCRIBE_THRESHOLD) {
+    remote_temp_threshold = messageTemp.toFloat();
+    Serial.print("Batas Suhu Baru Diterima: ");
+    Serial.print(remote_temp_threshold);
+    Serial.println(" C");
   }
 }
 
+// FUNGSI RECONNECT BARU (Non-Blocking Attempt)
 void reconnect() {
-  while (!client.connected()) {
-    Serial.print("Attempting MQTT connection...");
+  Serial.print("Mencoba koneksi MQTT (Non-blocking)...");
+  if (client.connect("ESP32Client1")) {
+    Serial.println("terhubung");
+    client.subscribe(TOPIC_SUBSCRIBE_STATE);
+    client.subscribe(TOPIC_SUBSCRIBE_THRESHOLD);
     
-    if (client.connect(mqtt_client_id)) {
-      Serial.println("connected");
-      Serial.println("Connected to MQTT broker");
-    } else {
-      Serial.print("failed, rc=");
-      Serial.print(client.state());
-      Serial.println(" retrying in 5 seconds");
-      delay(5000);
-    }
-  }
-}
-
-float readNTCTemperature() {
-  int sum = 0;
-  for (int i = 0; i < 10; i++) {
-    sum += analogRead(SOIL_TEMP_PIN);
-    delay(10);
-  }
-  int rawADC = sum / 10;
-
-  float voltage = (rawADC / ADC_MAX) * VCC;
-
-  float resistance;
-  if (voltage > 0.01) {
-    resistance = SERIES_RESISTOR * ((VCC / voltage) - 1.0);
+    client.publish(TOPIC_SUBSCRIBE_STATE, system_running ? "START" : "STOP");
   } else {
-    resistance = NTC_NOMINAL;
-  }
-
-  float steinhart;
-  steinhart = resistance / NTC_NOMINAL;
-  steinhart = log(steinhart);
-  steinhart /= B_COEFFICIENT;
-  steinhart += 1.0 / (TEMP_NOMINAL + 273.15);
-  steinhart = 1.0 / steinhart;
-  steinhart -= 273.15;
-
-  return steinhart;
-}
-
-void publishSensorData() {
-  float temp_air = dht.readTemperature();
-  float humidity = dht.readHumidity();
-
-  float temp_soil = readNTCTemperature();
-
-  int soil_value = analogRead(SOIL_TEMP_PIN);  
-  soil_value = map(soil_value, 0, 4095, 1000, 0);  // contoh soil moisture (0–1000)
-
-  if (!isnan(temp_air) && !isnan(humidity)) {
-    
-    StaticJsonDocument<200> doc;
-
-    doc["soil"] = soil_value;
-    doc["temp"] = round(temp_air * 10) / 10.0;
-    doc["hum"]  = round(humidity * 10) / 10.0;
-
-    char buffer[200];
-    serializeJson(doc, buffer);
-
-    if (client.publish(TOPIC_TEMP_AIR, buffer)) {
-      Serial.print("Published: ");
-      Serial.println(buffer);
-    } else {
-      Serial.println("Failed to publish environment data");
-    }
-
-  } else {
-    Serial.println("Failed to read DHT22 sensor");
+    Serial.print("gagal, rc=");
+    Serial.println(client.state());
   }
 }
 
 void setup() {
   Serial.begin(115200);
-  delay(1000);
+  
+  // Konfigurasi Pin
+  pinMode(LED_FULL_OPEN, OUTPUT);
+  pinMode(LED_HALF_OPEN, OUTPUT);
+  pinMode(LED_FULL_CLOSE, OUTPUT);
+  
+  // Set status awal LED ke kondisi RUN/NORMAL
+  setLEDState(HIGH, LOW, LOW, "INISIALISASI NORMAL"); 
 
-  dht.begin();
-  pinMode(SOIL_TEMP_PIN, INPUT);
+  // Inisialisasi Sensor
+  sensors.begin();
   analogReadResolution(12);
 
-  setup_wifi();
-  client.setServer(mqtt_server, mqtt_port);
-
-  Serial.println("\nSystem ready! Publishing data...\n");
+  // Inisialisasi Wi-Fi & MQTT (Blokir hanya di setup)
+  Serial.print("Menghubungkan ke WiFi...");
+  WiFi.begin(ssid, password);
+  while (WiFi.status() != WL_CONNECTED) {
+    delay(500);
+    Serial.print(".");
+  }
+  Serial.println("\nWiFi terhubung!");
+  
+  client.setServer(mqtt_server, 1883);
+  client.setCallback(callback);
 }
 
 void loop() {
-  if (WiFi.status() != WL_CONNECTED) {
-    Serial.println("WiFi disconnected! Reconnecting...");
-    setup_wifi();
-  }
-
+  long now = millis();
+  
+  // Reconnect Non-blocking di Loop
   if (!client.connected()) {
-    reconnect();
+    if (now - lastReconnectAttempt > 5000) {
+      lastReconnectAttempt = now;
+      reconnect(); // Attempt reconnect
+    }
   }
-  client.loop();
 
-  unsigned long currentMillis = millis();
-  if (currentMillis - lastPublish >= publishInterval) {
-    lastPublish = currentMillis;
-    publishSensorData();
+  // MQTT Client loop (HARUS dipanggil untuk memproses pesan masuk jika terhubung)
+  client.loop(); 
+
+  // --- Pembacaan Data Sensor ---
+  sensors.requestTemperatures(); 
+  float temperatureC = sensors.getTempCByIndex(0);
+  int gasAnalog = analogRead(GAS_SENSOR_PIN);
+  
+  // 1. Publikasi Data Sensor hanya jika terhubung
+  if (now - lastMsg > 3000) {
+    lastMsg = now;
+    
+    if (client.connected()) { 
+        StaticJsonDocument<200> doc;
+        doc["temp"] = temperatureC;
+        doc["gas"] = gasAnalog;
+        doc["running"] = system_running;
+        char output[100];
+        serializeJson(doc, output);
+        client.publish(TOPIC_PUBLISH_SENSORS, output);
+    } else {
+        Serial.println("Status: OFFLINE. Sensor data tidak dipublikasikan ke remote.");
+    }
+  }
+  
+  // 2. Logika Kontrol LED (TETAP BERJALAN TERUS meskipun offline)
+  if (system_running) {
+    
+    // A. KONDISI 1: TUTUP PENUH (Prioritas Tertinggi: Suhu melebihi batas remote ATAU Gas Tinggi)
+    if (temperatureC > remote_temp_threshold || gasAnalog > GAS_THRESHOLD_HIGH) {
+      setLEDState(LOW, LOW, HIGH, "Safety Override");
+    } 
+    
+    // B. KONDISI 2: Waspada
+    else if (gasAnalog > GAS_THRESHOLD_MID) {
+      setLEDState(LOW, HIGH, LOW, "Waspada (Gas Menengah)");
+    } 
+    
+    // C. KONDISI 3: AMAN (Normal)
+    else {
+      setLEDState(HIGH, LOW, LOW, "Kondisi Normal/Aman");
+    }
+  } else {
+    // Jika system_running = false (perintah STOP dari remote)
+    setLEDState(LOW, LOW, HIGH, "DIHENTIKAN MANUAL"); 
   }
 }
