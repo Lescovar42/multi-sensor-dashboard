@@ -11,26 +11,26 @@ const char* mqtt_server = "broker.hivemq.com";
 const int mqtt_port = 1883;
 const char* mqtt_client_id = "WokwiClient1";
 
-const char* TOPIC_TEMP_AIR = "irrigation/sensor/environment";
-const char* TOPIC_TEMP_SOIL = "irrigation/sensor/soil";
+const char* TOPIC_TEMP_AIR = "irrigation/sensor/environment";  
+const char* TOPIC_TEMP_SOIL = "irrigation/sensor/soil"; // tidak dipakai untuk publish
 
-#define DHTPIN 15              // DHT22 sensor pin
-#define DHTTYPE DHT22          // DHT22 sensor type
-#define SOIL_TEMP_PIN 34       // NTC Temperature Sensor (ADC pin)
+#define DHTPIN 15
+#define DHTTYPE DHT22
+#define SOIL_TEMP_PIN 34
 
-#define SERIES_RESISTOR 10000   // 10K Ohm series resistor
-#define NTC_NOMINAL 10000       // NTC resistance at 25°C (10K)
-#define TEMP_NOMINAL 25         // Nominal temperature (25°C)
-#define B_COEFFICIENT 3950      // Beta coefficient (typical 3950)
-#define ADC_MAX 4095.0          // ESP32 12-bit ADC
-#define VCC 3.3                 // Supply voltage
+#define SERIES_RESISTOR 10000
+#define NTC_NOMINAL 10000
+#define TEMP_NOMINAL 25
+#define B_COEFFICIENT 3950
+#define ADC_MAX 4095.0
+#define VCC 3.3
 
 WiFiClient espClient;
 PubSubClient client(espClient);
 DHT dht(DHTPIN, DHTTYPE);
 
 unsigned long lastPublish = 0;
-const long publishInterval = 2000;  // Publish every 2 seconds
+const long publishInterval = 2000;  // 2 seconds
 
 void setup_wifi() {
   delay(10);
@@ -65,122 +65,90 @@ void reconnect() {
 }
 
 float readNTCTemperature() {
-  // Average multiple readings for stability
   int sum = 0;
   for (int i = 0; i < 10; i++) {
     sum += analogRead(SOIL_TEMP_PIN);
     delay(10);
   }
   int rawADC = sum / 10;
-  
-  // Convert ADC to voltage
+
   float voltage = (rawADC / ADC_MAX) * VCC;
-  
-  // Calculate NTC resistance using voltage divider
-  // R_NTC = R_series * (Vin/Vout - 1)
+
   float resistance;
   if (voltage > 0.01) {
     resistance = SERIES_RESISTOR * ((VCC / voltage) - 1.0);
   } else {
     resistance = NTC_NOMINAL;
   }
-  
-  // Steinhart-Hart Simplified (Beta equation)
-  // 1/T = 1/T0 + (1/B) * ln(R/R0)
+
   float steinhart;
-  steinhart = resistance / NTC_NOMINAL;          // (R/R0)
-  steinhart = log(steinhart);                    // ln(R/R0)
-  steinhart /= B_COEFFICIENT;                    // 1/B * ln(R/R0)
-  steinhart += 1.0 / (TEMP_NOMINAL + 273.15);    // + (1/T0)
-  steinhart = 1.0 / steinhart;                   // Invert
-  steinhart -= 273.15;                           // Convert to Celsius
-  
+  steinhart = resistance / NTC_NOMINAL;
+  steinhart = log(steinhart);
+  steinhart /= B_COEFFICIENT;
+  steinhart += 1.0 / (TEMP_NOMINAL + 273.15);
+  steinhart = 1.0 / steinhart;
+  steinhart -= 273.15;
+
   return steinhart;
 }
 
 void publishSensorData() {
-  // Read DHT22 (Air Temperature & Humidity)
   float temp_air = dht.readTemperature();
   float humidity = dht.readHumidity();
-  
-  // Read NTC (Soil Temperature)
+
   float temp_soil = readNTCTemperature();
-  
-  // Validate DHT22 readings
+
+  int soil_value = analogRead(SOIL_TEMP_PIN);  
+  soil_value = map(soil_value, 0, 4095, 1000, 0);  // contoh soil moisture (0–1000)
+
   if (!isnan(temp_air) && !isnan(humidity)) {
-    // Create JSON payload for air temperature
-    StaticJsonDocument<100> docAir;
-    docAir["temperature"] = round(temp_air * 10) / 10.0;  // 1 decimal
     
-    char jsonBufferAir[100];
-    serializeJson(docAir, jsonBufferAir);
-    
-    // Publish air temperature
-    if (client.publish(TOPIC_TEMP_AIR, jsonBufferAir)) {
-      Serial.print("Air Temp: ");
-      Serial.println(jsonBufferAir);
+    StaticJsonDocument<200> doc;
+
+    doc["soil"] = soil_value;
+    doc["temp"] = round(temp_air * 10) / 10.0;
+    doc["hum"]  = round(humidity * 10) / 10.0;
+
+    char buffer[200];
+    serializeJson(doc, buffer);
+
+    if (client.publish(TOPIC_TEMP_AIR, buffer)) {
+      Serial.print("Published: ");
+      Serial.println(buffer);
     } else {
-      Serial.println("Failed to publish air temp");
+      Serial.println("Failed to publish environment data");
     }
+
   } else {
     Serial.println("Failed to read DHT22 sensor");
-  }
-  
-  // Validate NTC reading (reasonable range for soil: 0-50°C)
-  if (temp_soil > -10 && temp_soil < 60) {
-    // Create JSON payload for soil temperature
-    StaticJsonDocument<100> docSoil;
-    docSoil["temperature"] = round(temp_soil * 10) / 10.0;  // 1 decimal
-    
-    char jsonBufferSoil[100];
-    serializeJson(docSoil, jsonBufferSoil);
-    
-    // Publish soil temperature
-    if (client.publish(TOPIC_TEMP_SOIL, jsonBufferSoil)) {
-      Serial.print("Soil Temp: ");
-      Serial.println(jsonBufferSoil);
-    } else {
-      Serial.println("Failed to publish soil temp");
-    }
-  } else {
-    Serial.println("NTC reading out of range");
   }
 }
 
 void setup() {
   Serial.begin(115200);
   delay(1000);
-  
-  // Initialize DHT22
-  dht.begin();
 
-  // Initialize NTC pin
+  dht.begin();
   pinMode(SOIL_TEMP_PIN, INPUT);
-  analogReadResolution(12);  // 12-bit ADC
-  
-  // Connect to WiFi
+  analogReadResolution(12);
+
   setup_wifi();
-  
-  // Setup MQTT
   client.setServer(mqtt_server, mqtt_port);
-  
+
   Serial.println("\nSystem ready! Publishing data...\n");
 }
 
 void loop() {
-  // Ensure WiFi is connected
   if (WiFi.status() != WL_CONNECTED) {
     Serial.println("WiFi disconnected! Reconnecting...");
     setup_wifi();
   }
-  
-  // Ensure MQTT is connected
+
   if (!client.connected()) {
     reconnect();
   }
   client.loop();
-  
-  // Publish data at interval
+
   unsigned long currentMillis = millis();
   if (currentMillis - lastPublish >= publishInterval) {
     lastPublish = currentMillis;
