@@ -8,6 +8,7 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 from collections import deque
 import threading
+from contextlib import contextmanager, suppress
 
 # Konfigurasi MQTT Broker (Wokwi menggunakan broker public)
 MQTT_BROKER = "broker.hivemq.com"  # Atau gunakan broker.emqx.io
@@ -33,18 +34,26 @@ class SensorData:
         self.timestamps = deque(maxlen=MAX_DATA_POINTS)
         self.servo_status = "OFF"
         self.last_update = None
+        self.lock = threading.Lock()  # Thread safety
         
     def add_temp_air(self, value):
-        self.temp_air.append(value)
-        self._update_timestamp()
+        with self.lock:
+            self.temp_air.append(value)
+            self._update_timestamp()
     
     def add_temp_soil(self, value):
-        self.temp_soil.append(value)
-        self._update_timestamp()
+        with self.lock:
+            self.temp_soil.append(value)
+            self._update_timestamp()
     
     def add_water_level(self, value):
-        self.water_level.append(value)
-        self._update_timestamp()
+        with self.lock:
+            self.water_level.append(value)
+            self._update_timestamp()
+    
+    def set_servo_status(self, status):
+        with self.lock:
+            self.servo_status = status
     
     def _update_timestamp(self):
         if len(self.timestamps) < MAX_DATA_POINTS or \
@@ -59,10 +68,18 @@ if 'sensor_data' not in st.session_state:
     st.session_state.mqtt_connected = False
     st.session_state.client = None
 
+# Helper function to safely access session state from threads
+@contextmanager
+def safe_session_state():
+    """Context manager to safely suppress ScriptRunContext warnings"""
+    with suppress(Exception):
+        yield
+
 # Callback MQTT
 def on_connect(client, userdata, flags, rc, properties=None):
     if rc == 0:
-        st.session_state.mqtt_connected = True
+        with safe_session_state():
+            st.session_state.mqtt_connected = True
         # Subscribe ke semua topic sensor
         client.subscribe(TOPIC_TEMP_AIR)
         client.subscribe(TOPIC_TEMP_SOIL)
@@ -70,21 +87,25 @@ def on_connect(client, userdata, flags, rc, properties=None):
         client.subscribe(TOPIC_SERVO_STATUS)
         print("Connected to MQTT Broker!")
     else:
-        st.session_state.mqtt_connected = False
+        with safe_session_state():
+            st.session_state.mqtt_connected = False
         print(f"Failed to connect, return code {rc}")
 
 def on_message(client, userdata, msg):
     try:
         payload = json.loads(msg.payload.decode())
         
+        # Get sensor_data reference once
+        sensor_data = userdata  # Pass sensor_data through userdata
+        
         if msg.topic == TOPIC_TEMP_AIR:
-            st.session_state.sensor_data.add_temp_air(payload.get('temperature', 0))
+            sensor_data.add_temp_air(payload.get('temperature', 0))
         elif msg.topic == TOPIC_TEMP_SOIL:
-            st.session_state.sensor_data.add_temp_soil(payload.get('temperature', 0))
+            sensor_data.add_temp_soil(payload.get('temperature', 0))
         elif msg.topic == TOPIC_WATER_LEVEL:
-            st.session_state.sensor_data.add_water_level(payload.get('level', 0))
+            sensor_data.add_water_level(payload.get('level', 0))
         elif msg.topic == TOPIC_SERVO_STATUS:
-            st.session_state.sensor_data.servo_status = payload.get('status', 'OFF')
+            sensor_data.set_servo_status(payload.get('status', 'OFF'))
             
     except json.JSONDecodeError:
         print(f"Failed to decode message from {msg.topic}")
@@ -92,7 +113,8 @@ def on_message(client, userdata, msg):
         print(f"Error processing message: {e}")
 
 def on_disconnect(client, userdata, rc, properties=None):
-    st.session_state.mqtt_connected = False
+    with safe_session_state():
+        st.session_state.mqtt_connected = False
     print("Disconnected from MQTT Broker")
 
 # Fungsi untuk setup MQTT client
@@ -100,6 +122,7 @@ def setup_mqtt():
     if st.session_state.client is None:
         # Gunakan CallbackAPIVersion.VERSION2 untuk menghindari deprecation warning
         client = mqtt.Client(callback_api_version=mqtt.CallbackAPIVersion.VERSION2)
+        client.user_data_set(st.session_state.sensor_data)  # Pass sensor_data through userdata
         client.on_connect = on_connect
         client.on_message = on_message
         client.on_disconnect = on_disconnect
