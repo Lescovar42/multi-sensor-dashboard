@@ -1,38 +1,23 @@
-/*
- * WOKWI 1 - TEMPERATURE SENSOR NODE
- * Multi-Sensor IoT Dashboard Project
- * Sensors: DHT22 (Air Temp) + NTC Temperature Sensor (Soil Temp)
- * 
- * MQTT Topics Published:
- * - wokwi/sensor/temp_air    : {"temperature": 25.5}
- * - wokwi/sensor/temp_soil   : {"temperature": 23.2}
- */
-
 #include <WiFi.h>
 #include <PubSubClient.h>
 #include <DHT.h>
 #include <ArduinoJson.h>
 #include <math.h>  // For NTC calculations
 
-// ========== WiFi Configuration ==========
 const char* ssid = "Wokwi-GUEST";
 const char* password = "";
 
-// ========== MQTT Configuration ==========
 const char* mqtt_server = "broker.hivemq.com";
 const int mqtt_port = 1883;
 const char* mqtt_client_id = "WokwiClient1";
 
-// ========== MQTT Topics ==========
 const char* TOPIC_TEMP_AIR = "irrigation/sensor/environment";
 const char* TOPIC_TEMP_SOIL = "irrigation/sensor/soil";
 
-// ========== Sensor Pins ==========
 #define DHTPIN 15              // DHT22 sensor pin
 #define DHTTYPE DHT22          // DHT22 sensor type
 #define SOIL_TEMP_PIN 34       // NTC Temperature Sensor (ADC pin)
 
-// ========== NTC Thermistor Constants ==========
 #define SERIES_RESISTOR 10000   // 10K Ohm series resistor
 #define NTC_NOMINAL 10000       // NTC resistance at 25°C (10K)
 #define TEMP_NOMINAL 25         // Nominal temperature (25°C)
@@ -40,16 +25,13 @@ const char* TOPIC_TEMP_SOIL = "irrigation/sensor/soil";
 #define ADC_MAX 4095.0          // ESP32 12-bit ADC
 #define VCC 3.3                 // Supply voltage
 
-// ========== Initialize Objects ==========
 WiFiClient espClient;
 PubSubClient client(espClient);
 DHT dht(DHTPIN, DHTTYPE);
 
-// ========== Timing ==========
 unsigned long lastPublish = 0;
 const long publishInterval = 2000;  // Publish every 2 seconds
 
-// ========== WiFi Setup ==========
 void setup_wifi() {
   delay(10);
   Serial.println();
@@ -66,7 +48,6 @@ void setup_wifi() {
   }
 }
 
-// ========== MQTT Reconnect ==========
 void reconnect() {
   while (!client.connected()) {
     Serial.print("Attempting MQTT connection...");
@@ -83,7 +64,6 @@ void reconnect() {
   }
 }
 
-// ========== Read NTC Temperature ==========
 float readNTCTemperature() {
   // Average multiple readings for stability
   int sum = 0;
@@ -118,7 +98,6 @@ float readNTCTemperature() {
   return steinhart;
 }
 
-// ========== Publish Sensor Data ==========
 void publishSensorData() {
   // Read DHT22 (Air Temperature & Humidity)
   float temp_air = dht.readTemperature();
@@ -168,7 +147,6 @@ void publishSensorData() {
   }
 }
 
-// ========== Setup ==========
 void setup() {
   Serial.begin(115200);
   delay(1000);
@@ -189,7 +167,6 @@ void setup() {
   Serial.println("\nSystem ready! Publishing data...\n");
 }
 
-// ========== Main Loop ==========
 void loop() {
   // Ensure WiFi is connected
   if (WiFi.status() != WL_CONNECTED) {
